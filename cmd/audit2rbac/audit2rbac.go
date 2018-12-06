@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/liggitt/audit2rbac/pkg"
+	"github.com/unclepeddy/audit2rbac/pkg"
 	"github.com/spf13/cobra"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -283,41 +283,90 @@ func (a *Audit2RBACOptions) Run() error {
 	opts.ExpandMultipleNamespacesToClusterScoped = a.ExpandMultipleNamespacesToClusterScoped
 	opts.ExpandMultipleNamesToUnnamed = a.ExpandMultipleNamesToUnnamed
 
-	generated := pkg.NewGenerator(getDiscoveryRoles(), attributes, opts).Generate()
+	generator := pkg.NewGenerator(getExistingRoles(), attributes, opts)
+	generated := generator.Generate()
 
-	fmt.Fprintln(a.Stderr, "Generating roles...")
+	// Build index of generated roles by name
+	optimalRolesIndex := map[string]*rbacv1.ClusterRole{}
+	for _, role := range generated.ClusterRoles {
+		optimalRolesIndex[role.ObjectMeta.Name] = role
+	}
 
-	firstSeparator := true
-	printSeparator := func() {
-		if firstSeparator {
-			firstSeparator = false
-			return
+	// Build a map of subject to rules they are bound to
+	optimalRulesMap := map[string]*[]rbacv1.PolicyRule{}
+	for _, binding := range generated.ClusterRoleBindings {
+		role := optimalRolesIndex[binding.RoleRef.Name]
+		for _, subject := range binding.Subjects {
+			for _, rule := range role.Rules {
+				if (optimalRulesMap[subject.Name] == nil) {
+					optimalRulesMap[subject.Name] = &[]rbacv1.PolicyRule{}
+				}
+				*optimalRulesMap[subject.Name] = append(*optimalRulesMap[subject.Name], rule)	
+			}
 		}
-		fmt.Fprintln(os.Stdout, "---")
-	}
-	for _, obj := range generated.Roles {
-		printSeparator()
-		pkg.Output(os.Stdout, obj, "yaml")
-	}
-	for _, obj := range generated.ClusterRoles {
-		printSeparator()
-		pkg.Output(os.Stdout, obj, "yaml")
-	}
-	for _, obj := range generated.RoleBindings {
-		printSeparator()
-		pkg.Output(os.Stdout, obj, "yaml")
-	}
-	for _, obj := range generated.ClusterRoleBindings {
-		printSeparator()
-		pkg.Output(os.Stdout, obj, "yaml")
 	}
 
-	fmt.Fprintln(a.Stderr, "Complete!")
+	// Build index of existing roles by name
+	existRoleIndex := map[string]*rbacv1.ClusterRole{}
+	for _, role := range generator.Existing().ClusterRoles {
+		existRoleIndex[role.ObjectMeta.Name] = role
+	}
+	
+	// Flag existing role binding with resources that don't appear in generated role bindings
+	allRulesUtilized := true
+	for _, binding := range generator.Existing().ClusterRoleBindings {
+		role := existRoleIndex[binding.RoleRef.Name]
+		rules := role.Rules
+
+		for _, subject := range binding.Subjects {
+			for _, rule := range rules {
+				if (!ruleIsUtilized(optimalRulesMap, subject.Name, rule)) {
+					fmt.Printf("Rule %s on resources %s for subject %s is not utilized\n", rule.Verbs, rule.Resources, subject.Name)
+					allRulesUtilized = false
+				}
+			}
+		}
+	}
+
+	if allRulesUtilized {
+		fmt.Println("All rules are utilized")
+	}
 
 	if hasErrors {
 		return fmt.Errorf("Errors occurred reading audit events")
 	}
 	return nil
+}
+
+// Returns true if a single resource-verb pair found in rule is found in rules contained in optimalRulesMap[subject]
+func ruleIsUtilized(optimalRulesMap map[string]*[]rbacv1.PolicyRule, subject string, rule rbacv1.PolicyRule) bool {
+	optimalRules := *optimalRulesMap[subject]
+
+	// If subject should have no rules, rule is not utilized
+	if (optimalRules == nil ) {
+		return false
+	}
+
+	// Build a set of optimal resource-verb pairs (using map because golang doesn't have support for generics)
+	optimalRuleSet := map[string]bool{}
+	for _, rule := range optimalRules {
+		for _, resource := range rule.Resources {
+			for _, verb := range rule.Verbs {
+				optimalRuleSet[verb+"::"+resource] = true
+			}
+		}
+	}
+
+	// If any part of the rule is contained within the optimal set, consider the rule as utilized
+	for _, resource := range rule.Resources {
+		for _, verb := range rule.Verbs {
+			if optimalRuleSet[verb+"::"+resource] {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func sanitizeName(s string) string {
@@ -582,24 +631,49 @@ func eventToAttributes(event *audit.Event) authorizer.AttributesRecord {
 	return attrs
 }
 
-func getDiscoveryRoles() pkg.RBACObjects {
+func getExistingRoles() pkg.RBACObjects {
 	return pkg.RBACObjects{
 		ClusterRoles: []*rbacv1.ClusterRole{
 			&rbacv1.ClusterRole{
-				ObjectMeta: metav1.ObjectMeta{Name: "system:discovery"},
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-creator"},
 				Rules: []rbacv1.PolicyRule{
-					rbacv1helper.NewRule("get").URLs("/healthz", "/version", "/swagger*", "/openapi*", "/api*").RuleOrDie(),
+					rbacv1helper.NewRule("create").Groups("").Resources("pods").RuleOrDie(),
+				},
+			},
+			&rbacv1.ClusterRole{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-reader"},
+				Rules: []rbacv1.PolicyRule{
+					rbacv1helper.NewRule("get").Groups("").Resources("pods").RuleOrDie(),
+				},
+			},
+			&rbacv1.ClusterRole{
+				ObjectMeta: metav1.ObjectMeta{Name: "secret-reader"},
+				Rules: []rbacv1.PolicyRule{
+					rbacv1helper.NewRule("get").Groups("").Resources("secrets").RuleOrDie(),
 				},
 			},
 		},
 		ClusterRoleBindings: []*rbacv1.ClusterRoleBinding{
 			&rbacv1.ClusterRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: "system:discovery"},
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-creator"},
 				Subjects: []rbacv1.Subject{
-					{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "system:authenticated"},
-					{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "system:unauthenticated"},
+					{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "alice"},
 				},
-				RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "system:discovery"},
+				RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "pod-creator"},
+			},
+			&rbacv1.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-reader"},
+				Subjects: []rbacv1.Subject{
+					{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "alice"},
+				},
+				RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "pod-reader"},
+			},
+			&rbacv1.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "secret-reader"},
+				Subjects: []rbacv1.Subject{
+					{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: "alice"},
+				},
+				RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "secret-reader"},
 			},
 		},
 	}

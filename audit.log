@@ -1,0 +1,2 @@
+{"kind":"Event","apiVersion":"audit.k8s.io/v1beta1","requestURI":"/api/v1/namespaces/ns1/pods","verb":"create","user":{"username":"alice","groups":["system:authenticated"]}, "objectRef":{"resource":"pods","apiVersion":"v1"}}
+{"kind":"Event","apiVersion":"audit.k8s.io/v1beta1","requestURI":"/api/v1/namespaces/ns1/secrets","verb":"get","user":{"username":"alice","groups":["system:authenticated"]}, "objectRef":{"resource":"secrets","apiVersion":"v1"}}
