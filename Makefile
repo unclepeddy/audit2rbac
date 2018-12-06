@@ -22,7 +22,10 @@ build: check_go_version
 build-cross: check_go_version
 	./build/build-cross.sh cmd/audit2rbac/audit2rbac.go
 
-install:
+dataservice: 
+	go install github.com/unclepeddy/audit2rbac/pkg/dataservice
+	
+prototype:
 	go install $(shell ./build/print-ldflags.sh) ./cmd/audit2rbac
 
 clean:

@@ -2,7 +2,6 @@ package pkg
 
 import (
 	"reflect"
-
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
@@ -76,6 +75,10 @@ func NewGenerator(existing RBACObjects, requests []authorizer.AttributesRecord, 
 		namespacedRoleBinding: map[string]*rbacv1.RoleBinding{},
 		generatedGetter:       getter,
 	}
+}
+
+func (g *Generator) Existing() RBACObjects {
+	return g.existing
 }
 
 // Generate returns a set of RBAC roles and bindings that cover the specified requests
